@@ -52,6 +52,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { Reflector } from 'three/addons/objects/Reflector.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -110,6 +111,7 @@ function disposeModel() {
   pivot.traverse(o => {
     if (o.geometry) o.geometry.dispose();
     if (o.material) [].concat(o.material).forEach(m => m.dispose());
+    if (o.getRenderTarget) o.getRenderTarget().dispose();   // Spiegel
   });
   pivot = null;
 }
@@ -137,10 +139,62 @@ function applyWire() {
   });
 }
 
+// MIRRORS-BEGIN
+// Echte Spiegel: ebene Flächen mit Vollmetall-Material (Metall >= 0.9, Rauheit <= 0.1)
+// werden durch einen Reflector ersetzt, der die Szene wirklich spiegelt.
+function makeMirrors(root) {
+  const found = [];
+  root.traverse(o => {
+    if (!o.isMesh || Array.isArray(o.material)) return;
+    const m = o.material;
+    if (m.metalness >= 0.9 && m.roughness <= 0.1) found.push(o);
+  });
+  const made = [];
+  for (const mesh of found) {
+    const parent = mesh.parent;
+    if (!parent) continue;
+    const geo = mesh.geometry.clone();
+    geo.applyMatrix4(mesh.matrix);                       // in den Raum des Elternobjekts
+    const pos = geo.attributes.position;
+    const idx = geo.index;
+    const ia = idx ? idx.getX(0) : 0, ib = idx ? idx.getX(1) : 1, ic = idx ? idx.getX(2) : 2;
+    const va = new THREE.Vector3().fromBufferAttribute(pos, ia);
+    const vb = new THREE.Vector3().fromBufferAttribute(pos, ib);
+    const vc = new THREE.Vector3().fromBufferAttribute(pos, ic);
+    const n = vb.sub(va).cross(vc.sub(va)).normalize();  // Flächennormale (zeigt zur Vorderseite)
+    geo.computeBoundingBox();
+    const center = geo.boundingBox.getCenter(new THREE.Vector3());
+    const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), n);
+    geo.translate(-center.x, -center.y, -center.z);
+    geo.applyQuaternion(q.clone().invert());             // Fläche liegt jetzt in der lokalen XY-Ebene
+    geo.computeBoundingBox();
+    const size = geo.boundingBox.getSize(new THREE.Vector3());
+    if (size.z > Math.max(size.x, size.y) * 1e-3) { geo.dispose(); continue; }   // nicht eben: normal lassen
+    const dpr = renderer.getPixelRatio();
+    const mirror = new Reflector(geo, {
+      color: new THREE.Color().setRGB(0.5, 0.5, 0.5, THREE.LinearSRGBColorSpace),  // neutral, keine Färbung
+      textureWidth: Math.round(Math.min(1600, innerWidth * dpr)),
+      textureHeight: Math.round(Math.min(1600, innerHeight * dpr)),
+      clipBias: size.length() * 0.0005
+    });
+    mirror.name = (mesh.name || 'mirror') + '_reflector';
+    mirror.position.copy(center);
+    mirror.quaternion.copy(q);
+    parent.add(mirror);
+    parent.remove(mesh);
+    mesh.geometry.dispose();
+    mesh.material.dispose();
+    made.push(mirror);
+  }
+  return made;
+}
+// MIRRORS-END
+
 function setModel(obj, name) {
   disposeModel();
   pivot = new THREE.Group();
   pivot.add(obj);
+  try { makeMirrors(obj); } catch (e) { console.warn('Spiegel nicht möglich:', e); }
   pivot.rotation.x = tilted ? -Math.PI / 2 : 0;
   applyWire();
   scene.add(pivot);
