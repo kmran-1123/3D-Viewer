@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kristina × DG · 3D Studio</title>
+<meta property="og:title" content="Kristina × DG · 3D Studio">
+<meta property="og:description" content="3D-Modell ansehen, drehen und zoomen.">
+<style>
+  html, body { margin:0; height:100%; background:#14161a; color:#ddd;
+               font-family:system-ui, -apple-system, sans-serif; overflow:hidden; }
+  canvas { display:block; touch-action:none; }
+  #brand { position:fixed; top:12px; left:14px; font-size:15px; letter-spacing:.12em;
+           text-transform:uppercase; font-weight:600; pointer-events:none; }
+  #brand span { color:#e0a84a; }
+  #ui { position:fixed; bottom:14px; left:10px; right:10px; display:flex; gap:8px;
+        flex-wrap:wrap; justify-content:center; pointer-events:none; }
+  #ui > * { pointer-events:auto; }
+  button, label.btn { background:#262a31cc; color:#eee; border:1px solid #484b52;
+        border-radius:999px; padding:9px 14px; font-size:14px; cursor:pointer;
+        backdrop-filter:blur(6px); }
+  button:hover, label.btn:hover { background:#3a3e45; }
+  button.on { background:#e0a84a; border-color:#e0a84a; color:#111; }
+  #hint { position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+          text-align:center; pointer-events:none; color:#888; font-size:18px; padding:20px; }
+  #msg { position:fixed; top:36px; left:14px; font-size:12px; color:#888; pointer-events:none; }
+  input[type=file] { display:none; }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+
+<div id="brand">Kristina <span>×</span> DG · 3D Studio</div>
+<div id="msg"></div>
+<div id="hint">.glb / .gltf / .obj hierher ziehen<br>oder unten „Datei öffnen“ wählen</div>
+<div id="ui">
+  <label class="btn" id="openLabel">Datei öffnen<input id="file" type="file" accept=".glb,.gltf,.obj"></label>
+  <button id="bRot">Auto-Drehen</button>
+  <button id="bWire">Drahtgitter</button>
+  <button id="bBg">Hintergrund</button>
+  <button id="bAxis">Achse kippen</button>
+  <button id="bReset">Zurücksetzen</button>
+</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+const $ = id => document.getElementById(id);
+const params = new URLSearchParams(location.search);
+
+const DARK = 0x14161a, LIGHT = 0xeeeeee;
+
+const renderer = new THREE.WebGLRenderer({ antialias:true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(DARK);
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+const dir = new THREE.DirectionalLight(0xffffff, 1.5);
+dir.position.set(3, 5, 4);
+scene.add(dir, new THREE.HemisphereLight(0xffffff, 0x444455, 0.6));
+
+const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 10000);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.enableDamping = true;
+controls.autoRotateSpeed = 2;
+
+let pivot = null, tilted = false, wire = false, bgDark = true;
+
+function disposeModel() {
+  if (!pivot) return;
+  scene.remove(pivot);
+  pivot.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) [].concat(o.material).forEach(m => m.dispose());
+  });
+  pivot = null;
+}
+
+function frame() {
+  if (!pivot) return;
+  pivot.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(pivot);
+  const size = box.getSize(new THREE.Vector3());
+  const center = box.getCenter(new THREE.Vector3());
+  const radius = Math.max(size.x, size.y, size.z) * 0.5 || 1;
+  const dist = radius / Math.sin(THREE.MathUtils.degToRad(camera.fov / 2)) * 1.1;
+  camera.near = dist / 100;
+  camera.far = dist * 100;
+  camera.updateProjectionMatrix();
+  camera.position.copy(center).add(new THREE.Vector3(1, 0.7, 1).normalize().multiplyScalar(dist));
+  controls.target.copy(center);
+  controls.update();
+}
+
+function applyWire() {
+  if (!pivot) return;
+  pivot.traverse(o => {
+    if (o.material) [].concat(o.material).forEach(m => m.wireframe = wire);
+  });
+}
+
+function setModel(obj, name) {
+  disposeModel();
+  pivot = new THREE.Group();
+  pivot.add(obj);
+  pivot.rotation.x = tilted ? -Math.PI / 2 : 0;
+  applyWire();
+  scene.add(pivot);
+  frame();
+  $('hint').style.display = 'none';
+  $('msg').textContent = name;
+}
+
+function load(buffer, name) {
+  const ext = name.split('.').pop().toLowerCase();
+  try {
+    if (ext === 'obj') {
+      const obj = new OBJLoader().parse(new TextDecoder().decode(buffer));
+      const mat = new THREE.MeshStandardMaterial({ color:0xcccccc, roughness:0.6, metalness:0.1, side:THREE.DoubleSide });
+      obj.traverse(o => { if (o.isMesh) o.material = mat; });
+      setModel(obj, name);
+    } else {
+      new GLTFLoader().parse(buffer, '', gltf => setModel(gltf.scene, name),
+        err => { $('msg').textContent = 'Fehler beim Laden: ' + (err.message || err); });
+    }
+  } catch (e) {
+    $('msg').textContent = 'Fehler beim Laden: ' + e.message;
+  }
+}
+
+async function loadFile(file) { load(await file.arrayBuffer(), file.name); }
+
+// Modell per Link laden:  ...?model=meinmodell.glb
+async function loadFromUrl(path) {
+  const url = new URL(path, location.href);
+  if (url.origin !== location.origin) { $('msg').textContent = 'Nur Modelle von dieser Seite erlaubt.'; return; }
+  $('hint').textContent = 'Modell wird geladen …';
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('Datei nicht gefunden (' + res.status + ')');
+    load(await res.arrayBuffer(), decodeURIComponent(url.pathname.split('/').pop()));
+  } catch (e) {
+    $('hint').textContent = 'Konnte das Modell nicht laden: ' + e.message;
+  }
+}
+
+$('file').addEventListener('change', e => e.target.files[0] && loadFile(e.target.files[0]));
+addEventListener('dragover', e => e.preventDefault());
+addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]); });
+
+$('bRot').onclick = e => { controls.autoRotate = !controls.autoRotate; e.target.classList.toggle('on', controls.autoRotate); };
+$('bWire').onclick = e => { wire = !wire; e.target.classList.toggle('on', wire); applyWire(); };
+$('bBg').onclick = () => {
+  bgDark = !bgDark;
+  scene.background = new THREE.Color(bgDark ? DARK : LIGHT);
+  document.body.style.background = bgDark ? '#14161a' : '#eeeeee';
+  document.body.style.color = bgDark ? '#ddd' : '#222';
+};
+$('bAxis').onclick = e => {
+  tilted = !tilted;
+  e.target.classList.toggle('on', tilted);
+  if (pivot) { pivot.rotation.x = tilted ? -Math.PI / 2 : 0; frame(); }
+};
+$('bReset').onclick = frame;
+
+addEventListener('resize', () => {
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+
+// Optionen per Link: &tilt=1 (Achse kippen), &rotate=1 (Auto-Drehen), &ui=0 (Knöpfe ausblenden)
+if (params.get('tilt') === '1') { tilted = true; $('bAxis').classList.add('on'); }
+if (params.get('rotate') === '1') { controls.autoRotate = true; $('bRot').classList.add('on'); }
+if (params.get('ui') === '0') $('ui').style.display = 'none';
+
+if (params.get('model')) {
+  $('openLabel').style.display = 'none';
+  loadFromUrl(params.get('model'));
+}
+</script>
+</body>
+</html>
