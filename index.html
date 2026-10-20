@@ -42,6 +42,7 @@
   <label class="btn" id="openLabel">Datei öffnen<input id="file" type="file" accept=".glb,.gltf,.obj"></label>
   <button id="bRot">Auto-Drehen</button>
   <button id="bWire">Drahtgitter</button>
+  <button id="bMirror">Metall = Spiegel</button>
   <button id="bBg">Hintergrund</button>
   <button id="bAxis">Achse kippen</button>
   <button id="bReset">Zurücksetzen</button>
@@ -103,10 +104,11 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.autoRotateSpeed = 2;
 
-let pivot = null, tilted = false, wire = false, bgDark = true;
+let pivot = null, tilted = false, wire = false, bgDark = true, mirrorMode = false;
 
 function disposeModel() {
   if (!pivot) return;
+  restoreMirrors(pivot);
   scene.remove(pivot);
   pivot.traverse(o => {
     if (o.geometry) o.geometry.dispose();
@@ -180,21 +182,43 @@ function makeMirrors(root) {
     mirror.name = (mesh.name || 'mirror') + '_reflector';
     mirror.position.copy(center);
     mirror.quaternion.copy(q);
+    mirror.userData.originalMesh = mesh;                 // zum Zurückschalten merken
     parent.add(mirror);
     parent.remove(mesh);
-    mesh.geometry.dispose();
-    mesh.material.dispose();
     made.push(mirror);
   }
   return made;
 }
 // MIRRORS-END
 
+// Spiegel wieder durch die ursprünglichen Flächen ersetzen
+function restoreMirrors(root) {
+  const list = [];
+  root.traverse(o => { if (o.userData && o.userData.originalMesh) list.push(o); });
+  for (const r of list) {
+    const parent = r.parent;
+    if (parent) { parent.add(r.userData.originalMesh); parent.remove(r); }
+    r.geometry.dispose();
+    r.material.dispose();
+    r.getRenderTarget().dispose();
+  }
+}
+
+function setMirrors(on) {
+  if (!pivot) return;
+  if (on) {
+    try { makeMirrors(pivot); } catch (e) { console.warn('Spiegel nicht möglich:', e); }
+    applyWire();
+  } else {
+    restoreMirrors(pivot);
+  }
+}
+
 function setModel(obj, name) {
   disposeModel();
   pivot = new THREE.Group();
   pivot.add(obj);
-  try { makeMirrors(obj); } catch (e) { console.warn('Spiegel nicht möglich:', e); }
+  if (mirrorMode) setMirrors(true);
   pivot.rotation.x = tilted ? -Math.PI / 2 : 0;
   applyWire();
   scene.add(pivot);
@@ -242,6 +266,7 @@ addEventListener('drop', e => { e.preventDefault(); if (e.dataTransfer.files[0])
 
 $('bRot').onclick = e => { controls.autoRotate = !controls.autoRotate; e.target.classList.toggle('on', controls.autoRotate); };
 $('bWire').onclick = e => { wire = !wire; e.target.classList.toggle('on', wire); applyWire(); };
+$('bMirror').onclick = e => { mirrorMode = !mirrorMode; e.target.classList.toggle('on', mirrorMode); setMirrors(mirrorMode); };
 $('bBg').onclick = () => {
   bgDark = !bgDark;
   scene.background = new THREE.Color(bgDark ? DARK : LIGHT);
@@ -266,6 +291,7 @@ renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, came
 // Optionen per Link: &tilt=1 (Achse kippen), &rotate=1 (Auto-Drehen), &ui=0 (Knöpfe ausblenden)
 if (params.get('tilt') === '1') { tilted = true; $('bAxis').classList.add('on'); }
 if (params.get('rotate') === '1') { controls.autoRotate = true; $('bRot').classList.add('on'); }
+if (params.get('mirror') === '1') { mirrorMode = true; $('bMirror').classList.add('on'); }
 if (params.get('ui') === '0') $('ui').style.display = 'none';
 
 if (params.get('model')) {
