@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Kristina × DG · 3D Studio</title>
-<meta property="og:title" content="Kristina × DG · 3D Studio">
+<title>KR × DG · 3D Studio</title>
+<meta property="og:title" content="KR × DG · 3D Studio">
 <meta property="og:description" content="3D-Modell ansehen, drehen und zoomen.">
 <style>
   html, body { margin:0; height:100%; background:#14161a; color:#ddd;
@@ -35,7 +35,7 @@
 </head>
 <body>
 
-<div id="brand">Kristina <span>×</span> DG · 3D Studio</div>
+<div id="brand">KR <span>×</span> DG · 3D Studio</div>
 <div id="msg"></div>
 <div id="hint">.glb / .gltf / .obj hierher ziehen<br>oder unten „Datei öffnen“ wählen</div>
 <div id="ui">
@@ -52,7 +52,6 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -68,7 +67,31 @@ document.body.appendChild(renderer.domElement);
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(DARK);
 const pmrem = new THREE.PMREMGenerator(renderer);
-scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+
+// Studio-Umgebung mit hellen Lichtflächen: ergibt scharfe, kontrastreiche Spiegelungen
+function makeStudioEnv() {
+  const env = new THREE.Scene();
+  env.add(new THREE.Mesh(
+    new THREE.BoxGeometry(24, 24, 24),
+    new THREE.MeshBasicMaterial({ color: 0x23262c, side: THREE.BackSide })
+  ));
+  const panel = (w, h, x, y, z, level) => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(w, h),
+      new THREE.MeshBasicMaterial({ color: new THREE.Color(level, level, level), side: THREE.DoubleSide })
+    );
+    m.position.set(x, y, z);
+    m.lookAt(0, 0, 0);
+    env.add(m);
+  };
+  panel(12, 12, 0, 11.5, 0, 5);       // große Fläche oben
+  panel(3, 10, -11.5, 2, 4, 6);       // Streifen links
+  panel(3, 10, 11.5, 2, -4, 6);       // Streifen rechts
+  panel(10, 3, 0, 1, 11.5, 3);        // Fläche vorne
+  panel(14, 14, 0, -11.5, 0, 0.8);    // schwacher Boden
+  return pmrem.fromScene(env, 0.01).texture;
+}
+scene.environment = makeStudioEnv();
 
 const dir = new THREE.DirectionalLight(0xffffff, 1.5);
 dir.position.set(3, 5, 4);
