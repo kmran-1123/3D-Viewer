@@ -68,9 +68,9 @@
   </div>
 </div>
 <div id="msg"></div>
-<div id="hint">.glb / .gltf / .obj hierher ziehen<br>oder unten „Datei öffnen“ wählen</div>
+<div id="hint">.glb / .gltf / .obj / .wrl hierher ziehen<br>oder unten „Datei öffnen“ wählen</div>
 <div id="ui">
-  <label class="btn" id="openLabel">Datei öffnen<input id="file" type="file" accept=".glb,.gltf,.obj"></label>
+  <label class="btn" id="openLabel">Datei öffnen<input id="file" type="file" accept=".glb,.gltf,.obj,.wrl,.vrml"></label>
   <button id="bRot">Auto-Drehen</button>
   <button id="bWire">Drahtgitter</button>
   <div class="dd">
@@ -432,10 +432,37 @@ function setModel(obj, name) {
   $('msg').textContent = name;
 }
 
-function load(buffer, name) {
+// VRML (.wrl): einfache Phong-/Lambert-Materialien in physikalische Materialien umwandeln,
+// damit Licht, Schatten und Glanz wie bei den anderen Formaten aussehen
+function vrmlMaterials(root) {
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    const list = [].concat(o.material).map(m => {
+      if (!m.isMeshPhongMaterial && !m.isMeshLambertMaterial) return m;
+      const s = new THREE.MeshStandardMaterial({
+        color: m.color, roughness: 0.5, metalness: 0, side: THREE.DoubleSide,
+        transparent: m.transparent, opacity: m.opacity
+      });
+      m.dispose();
+      return s;
+    });
+    o.material = Array.isArray(o.material) ? list : list[0];
+  });
+}
+
+async function load(buffer, name) {
   const ext = name.split('.').pop().toLowerCase();
   try {
-    if (ext === 'obj') {
+    if (ext === 'wrl' || ext === 'vrml') {
+      const text = new TextDecoder().decode(buffer);
+      const ver = /^\s*#VRML\s+V(\d+)\.\d+/i.exec(text);
+      if (!ver) throw new Error('keine gültige VRML-Datei');
+      if (ver[1] !== '2') throw new Error('nur VRML 2.0 wird unterstützt (in Rhino als „VRML 2.0" exportieren)');
+      const { VRMLLoader } = await import('three/addons/loaders/VRMLLoader.js');   // wird nur bei .wrl geladen
+      const obj = new VRMLLoader().parse(text, '');
+      vrmlMaterials(obj);
+      setModel(obj, name);
+    } else if (ext === 'obj') {
       const obj = new OBJLoader().parse(new TextDecoder().decode(buffer));
       const mat = new THREE.MeshStandardMaterial({ color:0xcccccc, roughness:0.6, metalness:0.1, side:THREE.DoubleSide });
       obj.traverse(o => { if (o.isMesh) o.material = mat; });
