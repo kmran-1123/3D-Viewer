@@ -70,7 +70,7 @@
 <div id="msg"></div>
 <div id="hint">.glb / .gltf / .obj / .wrl hierher ziehen<br>oder unten „Datei öffnen“ wählen</div>
 <div id="ui">
-  <label class="btn" id="openLabel">Datei öffnen<input id="file" type="file" accept=".glb,.gltf,.obj,.wrl,.vrml"></label>
+  <label class="btn" id="openLabel">Datei öffnen<input id="file" type="file"></label>
   <button id="bRot">Auto-Drehen</button>
   <button id="bWire">Drahtgitter</button>
   <div class="dd">
@@ -516,7 +516,18 @@ async function load(buffer, name) {
   }
 }
 
-async function loadFile(file) { load(await file.arrayBuffer(), file.name); }
+// Kein "accept" am Dateifeld: Android-Handys (v. a. Samsung) blenden Dateien mit unbekannter Endung wie .wrl
+// sonst grau aus. Die Endung wird deshalb hier geprüft.
+const OK_EXT = ['glb', 'gltf', 'obj', 'wrl', 'vrml'];
+async function loadFile(file) {
+  const ext = (file.name.includes('.') ? file.name.split('.').pop() : '').toLowerCase();
+  if (!OK_EXT.includes(ext)) {
+    $('msg').textContent = 'Format nicht unterstützt' + (ext ? ' (.' + ext + ')' : '') + ' – möglich: .glb, .gltf, .obj, .wrl';
+    return;
+  }
+  $('msg').textContent = file.name + ' wird geladen …';
+  load(await file.arrayBuffer(), file.name);
+}
 
 // Modell per Link laden:  ...?model=meinmodell.glb
 async function loadFromUrl(path) {
