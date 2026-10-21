@@ -435,6 +435,12 @@ function setModel(obj, name) {
 // VRML (.wrl): einfache Phong-/Lambert-Materialien in physikalische Materialien umwandeln,
 // damit Licht, Schatten und Glanz wie bei den anderen Formaten aussehen
 function vrmlMaterials(root) {
+  const sky = [];                                            // Sicherheitsnetz: übrig gebliebene Hintergrundkugeln
+  root.traverse(o => {
+    const m = o.isMesh && o.material;
+    if (m && !Array.isArray(m) && m.depthTest === false && m.depthWrite === false) sky.push(o);
+  });
+  sky.forEach(o => { if (o.parent) o.parent.remove(o); });
   root.traverse(o => {
     if (!o.isMesh) return;
     const list = [].concat(o.material).map(m => {
@@ -450,16 +456,50 @@ function vrmlMaterials(root) {
   });
 }
 
+// VRML-BEGIN
+// Entfernt Knoten, die nur Kamera/Hintergrund beschreiben (z. B. "Background" würde sonst eine
+// Riesenkugel um das Modell erzeugen). Jeder Knoten wird durch eine leere Gruppe ersetzt, damit die
+// Datei gültig bleibt, auch wenn der Knoten als einziges Kind stand.
+function stripVrmlNodes(text) {
+  const names = ['WorldInfo', 'NavigationInfo', 'Viewpoint', 'Background', 'Fog'];
+  const re = new RegExp('\\b(?:' + names.join('|') + ')\\s*\\{', 'g');
+  let out = '', last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index < last) continue;
+    let depth = 1, i = re.lastIndex, inStr = false;
+    for (; i < text.length && depth > 0; i++) {
+      const ch = text[i];
+      if (inStr) { if (ch === '\\') i++; else if (ch === '"') inStr = false; }
+      else if (ch === '"') inStr = true;
+      else if (ch === '#') { while (i < text.length && text[i] !== '\n') i++; }
+      else if (ch === '{') depth++;
+      else if (ch === '}') depth--;
+    }
+    if (depth !== 0) break;                                  // unvollständig: nichts mehr anfassen
+    out += text.slice(last, m.index) + 'Group {}';
+    last = i;
+    re.lastIndex = i;
+  }
+  return out + text.slice(last);
+}
+// VRML-END
+
 async function load(buffer, name) {
   const ext = name.split('.').pop().toLowerCase();
   try {
+    // VRML-Dateien aus CAD/Rhino/GAM haben meist Z nach oben (VRML selbst sieht Y vor): dann automatisch kippen.
+    // Per Link überschreibbar mit &tilt=0 oder &tilt=1.
+    if (!params.has('tilt')) {
+      tilted = (ext === 'wrl' || ext === 'vrml');
+      $('bAxis').classList.toggle('on', tilted);
+    }
     if (ext === 'wrl' || ext === 'vrml') {
       const text = new TextDecoder().decode(buffer);
       const ver = /^\s*#VRML\s+V(\d+)\.\d+/i.exec(text);
       if (!ver) throw new Error('keine gültige VRML-Datei');
       if (ver[1] !== '2') throw new Error('nur VRML 2.0 wird unterstützt (in Rhino als „VRML 2.0" exportieren)');
       const { VRMLLoader } = await import('three/addons/loaders/VRMLLoader.js');   // wird nur bei .wrl geladen
-      const obj = new VRMLLoader().parse(text, '');
+      const obj = new VRMLLoader().parse(stripVrmlNodes(text), '');
       vrmlMaterials(obj);
       setModel(obj, name);
     } else if (ext === 'obj') {
