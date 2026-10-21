@@ -100,6 +100,10 @@ const renderer = new THREE.WebGLRenderer({ antialias:true });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.setSize(innerWidth, innerHeight);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
+// Weiche Schatten: werden nur neu berechnet, wenn sich etwas ändert (spart Akku, besonders am Handy)
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.autoUpdate = false;
 document.body.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
@@ -122,18 +126,56 @@ function makeStudioEnv() {
     m.lookAt(0, 0, 0);
     env.add(m);
   };
-  panel(12, 12, 0, 11.5, 0, 5);       // große Fläche oben
-  panel(3, 10, -11.5, 2, 4, 6);       // Streifen links
-  panel(3, 10, 11.5, 2, -4, 6);       // Streifen rechts
-  panel(10, 3, 0, 1, 11.5, 3);        // Fläche vorne
+  // Die Umgebung liefert nur noch sanftes Grundlicht; das gerichtete Licht (unten) erzeugt Schatten und Form.
+  panel(12, 12, 0, 11.5, 0, 2.2);     // große Fläche oben
+  panel(3, 10, -11.5, 2, 4, 3.5);     // Streifen links
+  panel(3, 10, 11.5, 2, -4, 3.5);     // Streifen rechts
+  panel(10, 3, 0, 1, 11.5, 1.8);      // Fläche vorne
   panel(14, 14, 0, -11.5, 0, 0.8);    // schwacher Boden
   return pmrem.fromScene(env, 0.01).texture;
 }
 scene.environment = makeStudioEnv();
 
-const dir = new THREE.DirectionalLight(0xffffff, 1.5);
-dir.position.set(3, 5, 4);
-scene.add(dir, new THREE.HemisphereLight(0xffffff, 0x444455, 0.6));
+scene.add(new THREE.HemisphereLight(0xffffff, 0x444455, 0.35));
+
+// Lichtaufbau wie im Studio: Hauptlicht (aus vier leicht versetzten Lichtern = weiche Schattenränder
+// wie bei einer großen Softbox) und ein schwächeres Fülllicht von der Gegenseite.
+const shadowLights = [];
+function addShadowLight(intensity, dirVec) {
+  const l = new THREE.DirectionalLight(0xffffff, intensity);
+  l.castShadow = true;
+  l.shadow.mapSize.set(1024, 1024);
+  scene.add(l, l.target);
+  shadowLights.push({ l, dir: dirVec.clone().normalize() });
+}
+{
+  const KEY = new THREE.Vector3(-0.5, 1.0, 0.8).normalize();
+  const FILL = new THREE.Vector3(0.9, 0.45, 0.35).normalize();
+  const u = new THREE.Vector3().crossVectors(KEY, new THREE.Vector3(0, 1, 0)).normalize();
+  const v = new THREE.Vector3().crossVectors(u, KEY).normalize();
+  const s = 0.2;                                           // ca. 11° Streuung
+  for (const [a, b] of [[1, 1], [-1, 1], [1, -1], [-1, -1]])
+    addShadowLight(1.3, KEY.clone().addScaledVector(u, a * s).addScaledVector(v, b * s));
+  addShadowLight(1.2, FILL);
+}
+
+// Lichter und Schatten-Bereich an die Größe des Modells anpassen
+function fitLights(box) {
+  const sphere = box.getBoundingSphere(new THREE.Sphere());
+  const R = sphere.radius || 1;
+  for (const { l, dir } of shadowLights) {
+    l.position.copy(sphere.center).addScaledVector(dir, R * 4);
+    l.target.position.copy(sphere.center);
+    l.target.updateMatrixWorld();
+    const c = l.shadow.camera, e = R * 1.05;
+    c.left = -e; c.right = e; c.top = e; c.bottom = -e;
+    c.near = R * 0.5; c.far = R * 8;
+    c.updateProjectionMatrix();
+    l.shadow.bias = -0.0004;
+    l.shadow.normalBias = R * 0.004;
+  }
+  renderer.shadowMap.needsUpdate = true;
+}
 
 const camera = new THREE.PerspectiveCamera(45, innerWidth / innerHeight, 0.01, 10000);
 const controls = new OrbitControls(camera, renderer.domElement);
@@ -141,6 +183,8 @@ controls.enableDamping = true;
 controls.autoRotateSpeed = 2;
 
 let pivot = null, tilted = false, wire = false, mirrorMode = false;
+// Knickwinkel fürs Glätten (Grad); per Link abschaltbar mit &smooth=0
+const SMOOTH_DEG = params.has('smooth') ? Math.max(0, Math.min(80, Number(params.get('smooth')) || 0)) : 40;
 
 function disposeModel() {
   if (!pivot) return;
@@ -168,6 +212,7 @@ function frame() {
   camera.position.copy(center).add(new THREE.Vector3(1, 0.7, 1).normalize().multiplyScalar(dist));
   controls.target.copy(center);
   controls.update();
+  fitLights(box);
 }
 
 function applyWire() {
@@ -175,6 +220,124 @@ function applyWire() {
   pivot.traverse(o => {
     if (o.material) [].concat(o.material).forEach(m => m.wireframe = wire);
   });
+}
+
+// SMOOTH-BEGIN
+// Glättet die Schattierung über Flächengrenzen hinweg: Normalen an gleichen Eckpunkten werden
+// gemittelt, solange der Winkel zwischen den Flächen unter dem Knickwinkel bleibt. Harte Kanten
+// bleiben hart. posList: je Mesh ein Float64Array (Weltkoordinaten, nicht indiziert, 9 Werte je Dreieck).
+function smoothNormalsCore(posList, tol, cosT) {
+  const inv = 1 / tol;
+  const triU = [], triW = [], vertGroup = [];
+  const groupId = new Map(), groups = [];
+  posList.forEach((p, mi) => {
+    const nt = p.length / 9;
+    const U = new Float64Array(nt * 3), W = new Float64Array(nt * 3), VG = new Int32Array(nt * 3);
+    for (let t = 0; t < nt; t++) {
+      const o = t * 9;
+      const ax = p[o + 3] - p[o], ay = p[o + 4] - p[o + 1], az = p[o + 5] - p[o + 2];
+      const bx = p[o + 6] - p[o], by = p[o + 7] - p[o + 1], bz = p[o + 8] - p[o + 2];
+      const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+      const len = Math.hypot(nx, ny, nz);
+      W[t * 3] = nx; W[t * 3 + 1] = ny; W[t * 3 + 2] = nz;            // Fläche als Gewicht
+      if (len > 1e-18) { U[t * 3] = nx / len; U[t * 3 + 1] = ny / len; U[t * 3 + 2] = nz / len; }
+      for (let c = 0; c < 3; c++) {
+        const k = Math.round(p[o + c * 3] * inv) + ',' + Math.round(p[o + c * 3 + 1] * inv) + ',' + Math.round(p[o + c * 3 + 2] * inv);
+        let id = groupId.get(k);
+        if (id === undefined) { id = groups.length; groupId.set(k, id); groups.push([]); }
+        groups[id].push(mi, t);
+        VG[t * 3 + c] = id;
+      }
+    }
+    triU.push(U); triW.push(W); vertGroup.push(VG);
+  });
+  return posList.map((p, mi) => {
+    const nt = p.length / 9;
+    const out = new Float64Array(nt * 9);
+    const U = triU[mi], VG = vertGroup[mi];
+    for (let t = 0; t < nt; t++) {
+      const ux = U[t * 3], uy = U[t * 3 + 1], uz = U[t * 3 + 2];
+      for (let c = 0; c < 3; c++) {
+        const g = groups[VG[t * 3 + c]];
+        let sx = 0, sy = 0, sz = 0, ax = 0, ay = 0, az = 0;
+        for (let i = 0; i < g.length; i += 2) {
+          const Uj = triU[g[i]], Wj = triW[g[i]], tj = g[i + 1] * 3;
+          ax += Wj[tj]; ay += Wj[tj + 1]; az += Wj[tj + 2];
+          if (ux * Uj[tj] + uy * Uj[tj + 1] + uz * Uj[tj + 2] >= cosT) { sx += Wj[tj]; sy += Wj[tj + 1]; sz += Wj[tj + 2]; }
+        }
+        let len = Math.hypot(sx, sy, sz);
+        if (len < 1e-18) { sx = ax; sy = ay; sz = az; len = Math.hypot(sx, sy, sz); }   // entartetes Dreieck
+        const o = t * 9 + c * 3;
+        if (len < 1e-18) { out[o] = 0; out[o + 1] = 1; out[o + 2] = 0; }
+        else { out[o] = sx / len; out[o + 1] = sy / len; out[o + 2] = sz / len; }
+      }
+    }
+    return out;
+  });
+}
+// SMOOTH-END
+
+function smoothNormals(root, creaseDeg) {
+  root.updateMatrixWorld(true);
+  const meshes = [];
+  root.traverse(o => {
+    if (o.isMesh && !Array.isArray(o.material) && o.geometry && o.geometry.attributes.position) meshes.push(o);
+  });
+  if (!meshes.length) return;
+  const diag = new THREE.Box3().setFromObject(root).getSize(new THREE.Vector3()).length() || 1;
+  const v = new THREE.Vector3();
+  const posList = meshes.map(m => {
+    if (m.geometry.index) {                                  // Dreiecke einzeln, damit jede Ecke ihre eigene Normale bekommt
+      const g = m.geometry.toNonIndexed();
+      m.geometry.dispose();
+      m.geometry = g;
+    }
+    const p = m.geometry.attributes.position;
+    const arr = new Float64Array(p.count * 3);
+    for (let i = 0; i < p.count; i++) {
+      v.fromBufferAttribute(p, i).applyMatrix4(m.matrixWorld);
+      arr[i * 3] = v.x; arr[i * 3 + 1] = v.y; arr[i * 3 + 2] = v.z;
+    }
+    return arr;
+  });
+  const normals = smoothNormalsCore(posList, diag * 2e-5, Math.cos(creaseDeg * Math.PI / 180));
+  meshes.forEach((m, k) => {
+    const nw = normals[k], e = m.matrixWorld.elements, out = new Float32Array(nw.length);
+    for (let i = 0; i < nw.length; i += 3) {                 // zurück in den Raum des Meshes (transponierte 3x3-Matrix)
+      const x = nw[i], y = nw[i + 1], z = nw[i + 2];
+      const lx = e[0] * x + e[1] * y + e[2] * z;
+      const ly = e[4] * x + e[5] * y + e[6] * z;
+      const lz = e[8] * x + e[9] * y + e[10] * z;
+      const l = Math.hypot(lx, ly, lz) || 1;
+      out[i] = lx / l; out[i + 1] = ly / l; out[i + 2] = lz / l;
+    }
+    m.geometry.setAttribute('normal', new THREE.BufferAttribute(out, 3));
+  });
+}
+
+// Rhino exportiert Gips & Co. mit Brechungsindex 1.0 und ohne Rauheit: das ergibt völlig stumpfe,
+// flache Flächen. Hier werden realistische Werte gesetzt (nur bei nichtmetallischen Materialien).
+function tuneMaterials(root) {
+  root.traverse(o => {
+    if (!o.isMesh) return;
+    [].concat(o.material).forEach(m => {
+      if (!m.isMeshStandardMaterial || m.metalness >= 0.5) return;
+      if (m.isMeshPhysicalMaterial && m.ior < 1.2) m.ior = 1.5;
+      if (m.roughness > 0.55) m.roughness = 0.55;
+      m.needsUpdate = true;
+    });
+  });
+}
+
+// Alle Flächen werfen und empfangen Schatten (außer den Spiegeln); Schatten neu berechnen lassen
+function refreshShadows() {
+  if (!pivot) return;
+  pivot.traverse(o => {
+    if (!o.isMesh) return;
+    o.castShadow = !(o.userData && o.userData.originalMesh);
+    o.receiveShadow = true;
+  });
+  renderer.shadowMap.needsUpdate = true;
 }
 
 // MIRRORS-BEGIN
@@ -248,16 +411,22 @@ function setMirrors(on) {
   } else {
     restoreMirrors(pivot);
   }
+  refreshShadows();
 }
 
 function setModel(obj, name) {
   disposeModel();
   pivot = new THREE.Group();
   pivot.add(obj);
+  try { tuneMaterials(obj); } catch (e) { console.warn('Materialien:', e); }
+  if (SMOOTH_DEG > 0) {
+    try { smoothNormals(obj, SMOOTH_DEG); } catch (e) { console.warn('Glätten nicht möglich:', e); }
+  }
   if (mirrorMode) setMirrors(true);
   pivot.rotation.x = tilted ? -Math.PI / 2 : 0;
   applyWire();
   scene.add(pivot);
+  refreshShadows();
   frame();
   $('hint').style.display = 'none';
   $('msg').textContent = name;
